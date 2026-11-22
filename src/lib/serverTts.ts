@@ -12,8 +12,19 @@
  * Microsoft Edge TTS (native Thiha/Nilar voices, no API key — the
  * same consumer endpoint the Edge browser uses), Google Translate
  * TTS last. The caller reports the real provider via X-TTS-Provider.
+ *
+ * Edge handshake (kept in sync with rany2/edge-tts): since ~Oct 2024
+ * (edge-tts issue #290) the endpoint 403s any handshake that lacks the
+ * Sec-MS-GEC token — SHA-256 of the Windows file-time (floored to 5
+ * minutes) concatenated with the TrustedClientToken — plus a
+ * Sec-MS-GEC-Version whose floor Microsoft raises over time (below
+ * 1-133 now 403s). The User-Agent's Edg/ version must match that
+ * version. Sending only TrustedClientToken (as this code did before)
+ * is why Edge failed even from Vercel and everything fell back to
+ * Google.
  */
 import WebSocket from 'ws';
+import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 export type ServerVoice = 'thiha' | 'nilar';
 export type ServerProvider = 'azure' | 'edge' | 'google';
@@ -29,18 +40,55 @@ const TRUSTED_TOKEN = '6A5AA1D4EAFF4E9FB37E23D68491D6F4';
 const WS_BASE =
   'wss://speech.platform.bing.com/consumer/speech/synthesize/readaloud/edge/v1';
 
-const EDGE_UA =
-  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36 Edg/126.0.0.0';
+// Chromium version Edge's own client currently reports; feeds both
+// Sec-MS-GEC-Version and the User-Agent below — Microsoft's edge
+// (WAF-level, not just the GEC hash) rejects the handshake if the two
+// disagree, so this constant is the single source for both. Bump it to
+// a current Edge version if handshakes start 403ing again.
+const CHROMIUM_FULL_VERSION = '143.0.3650.75';
+const SEC_MS_GEC_VERSION = `1-${CHROMIUM_FULL_VERSION}`;
 
-function uuid(): string {
-  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
-    const r = (Math.random() * 16) | 0;
-    return (c === 'x' ? r : (r & 0x3) | 0x8).toString(16);
-  });
+const EDGE_UA =
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0';
+// Origin of the Edge Read Aloud extension (what edge-tts sends).
+const EDGE_ORIGIN = 'chrome-extension://jdiccldimpdaibmpoljnfkkaacifdlj';
+
+/**
+ * Sec-MS-GEC: uppercase hex SHA-256 of
+ * "<windows file-time ticks floored to 5 minutes><TrustedClientToken>".
+ * Ticks exceed Number.MAX_SAFE_INTEGER, so this uses BigInt — float math
+ * would silently lose precision on the ~1.3e17 tick value.
+ */
+function generateSecMsGec(): string {
+  const unixSeconds = BigInt(Math.floor(Date.now() / 1000));
+  const winSeconds = unixSeconds + 11_644_473_600n; // 1601-01-01 -> 1970-01-01
+  const floored = winSeconds - (winSeconds % 300n);
+  const ticks = floored * 10_000_000n; // seconds -> 100ns intervals
+  return createHash('sha256')
+    .update(`${ticks.toString()}${TRUSTED_TOKEN}`, 'ascii')
+    .digest('hex')
+    .toUpperCase();
 }
 
-function timestamp(): string {
-  return new Date().toUTCString().replace('GMT', 'GMT');
+/** Fresh 32-hex muid cookie per connection, as edge-tts sends. */
+function generateMuid(): string {
+  return randomBytes(16).toString('hex');
+}
+
+/** X-Timestamp in the format edge-tts sends, day zero-padded. */
+function edgeTimestamp(): string {
+  const d = new Date();
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const months = [
+    'Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+    'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec',
+  ];
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return (
+    `${days[d.getUTCDay()]} ${months[d.getUTCMonth()]} ${pad(d.getUTCDate())} ` +
+    `${d.getUTCFullYear()} ${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${pad(d.getUTCSeconds())} ` +
+    'GMT+0000 (Coordinated Universal Time)'
+  );
 }
 
 function escapeXml(s: string): string {
@@ -96,16 +144,32 @@ function splitForGoogle(text: string, maxLen = 180): string[] {
   return out.filter(Boolean);
 }
 
-/** One Edge TTS chunk -> MP3 bytes. */
-function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
+/** One Edge TTS chunk -> MP3 bytes. A single WebSocket turn. */
+function synthesizeEdgeChunkOnce(
+  text: string,
+  voiceName: string,
+  timeoutMs: number,
+): Promise<Buffer> {
   return new Promise((resolve, reject) => {
-    const connectionId = uuid();
-    const requestId = uuid();
-    const url = `${WS_BASE}?TrustedClientToken=${TRUSTED_TOKEN}&ConnectionId=${connectionId}`;
+    // Same no-dash id for ConnectionId and X-RequestId, as edge-tts does.
+    const connectionId = randomUUID().replace(/-/g, '');
+    const url =
+      `${WS_BASE}?TrustedClientToken=${TRUSTED_TOKEN}` +
+      `&Sec-MS-GEC=${generateSecMsGec()}` +
+      `&Sec-MS-GEC-Version=${SEC_MS_GEC_VERSION}` +
+      `&ConnectionId=${connectionId}`;
     let ws: WebSocket;
     try {
       ws = new WebSocket(url, {
-        headers: { 'User-Agent': EDGE_UA, Origin: 'https://www.bing.com' },
+        headers: {
+          'User-Agent': EDGE_UA,
+          Origin: EDGE_ORIGIN,
+          'Accept-Encoding': 'gzip, deflate, br',
+          'Accept-Language': 'en-US,en;q=0.9',
+          Pragma: 'no-cache',
+          'Cache-Control': 'no-cache',
+          Cookie: `muid=${generateMuid()}`,
+        },
       });
     } catch (e) {
       reject(e instanceof Error ? e : new Error('Edge WebSocket မဖွင့်နိုင်ပါ'));
@@ -123,7 +187,7 @@ function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
         }
         reject(new Error('Edge TTS အချိန်ကုန်သွားတယ် (timeout)'));
       }
-    }, 25_000);
+    }, timeoutMs);
     timer.unref?.();
 
     const done = (err?: Error, data?: Buffer) => {
@@ -136,14 +200,17 @@ function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
         /* ignore */
       }
       if (err) reject(err);
-      else if (data) resolve(data);
-      else reject(new Error('Edge TTS မှ အသံမရပါ'));
+      // A turn that ends with no audio at all is a failure, not silence —
+      // the caller retries it instead of returning an empty MP3.
+      else if (!data || data.length === 0)
+        reject(new Error('Edge TTS မှ အသံမရပါ'));
+      else resolve(data);
     };
 
     const SEP = Buffer.from('\r\n\r\n');
     ws.on('open', () => {
       const config =
-        `X-Timestamp:${timestamp()}\r\n` +
+        `X-Timestamp:${edgeTimestamp()}\r\n` +
         'Content-Type:application/json; charset=utf-8\r\n' +
         'Path:speech.config\r\n\r\n' +
         '{"context":{"synthesis":{"audio":{"metadataoptions":' +
@@ -151,9 +218,9 @@ function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
         '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
       ws.send(config);
       const ssml =
-        `X-RequestId:${requestId}\r\n` +
+        `X-RequestId:${connectionId}\r\n` +
         'Content-Type:application/ssml+xml\r\n' +
-        `X-Timestamp:${timestamp()}\r\n` +
+        `X-Timestamp:${edgeTimestamp()}\r\n` +
         'Path:ssml\r\n\r\n' +
         `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='my-MM'>` +
         `<voice name='${voiceName}'><prosody rate='+0%' pitch='+0Hz'>${escapeXml(text)}</prosody></voice></speak>`;
@@ -188,6 +255,29 @@ function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
       }
     });
   });
+}
+
+/**
+ * Edge TTS chunk with one retry: the Read Aloud endpoint is intermittent
+ * by nature (403/503 handshakes, turns that end with no audio). Both
+ * attempts together stay inside the 25s budget for the chunk.
+ */
+async function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
+  const deadline = Date.now() + 25_000;
+  let lastErr: Error | undefined;
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 1000) break;
+    try {
+      return await synthesizeEdgeChunkOnce(text, voiceName, remaining);
+    } catch (e) {
+      lastErr = e instanceof Error ? e : new Error('Edge TTS မရပါ');
+      if (attempt === 0 && Date.now() < deadline - 1000) {
+        await new Promise((r) => setTimeout(r, 500));
+      }
+    }
+  }
+  throw lastErr ?? new Error('Edge TTS မရပါ');
 }
 
 /** Azure Speech REST API — official endpoint, one chunk. */
@@ -246,6 +336,10 @@ export async function synthesizeBurmese(
   text: string,
   voice: ServerVoice,
 ): Promise<TtsResult> {
+  // The Edge service errors on C0 control characters (Whisper output can
+  // contain them) — strip them before any provider sees the text.
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  if (!text.trim()) throw new Error('မြန်မာအသံ ထုတ်မရပါ — စာမပါဘူး');
   const voiceName = VOICE_NAMES[voice];
   const failures: string[] = [];
 
