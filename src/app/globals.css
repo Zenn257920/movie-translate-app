@@ -36,6 +36,28 @@ header p {
   font-size: 14px;
 }
 
+.tab-row {
+  display: flex;
+  gap: 8px;
+  margin-top: 14px;
+}
+
+button.tab {
+  flex: 1;
+  background: #fff;
+  color: #174a7c;
+  border: 1.5px solid #b8cfe3;
+  margin-top: 0;
+  font-size: 15px;
+  padding: 11px 10px;
+}
+
+button.tab.active {
+  background: #174a7c;
+  color: #fff;
+  border-color: #174a7c;
+}
+
 .card {
   background: #fff;
   border: 1px solid #dceaf6;

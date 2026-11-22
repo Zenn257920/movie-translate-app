@@ -50,6 +50,18 @@ function downloadBlob(blob: Blob, filename: string) {
 }
 
 export default function Home() {
+  // Tab: 'text' is the simple workflow Kaung now uses most — type
+  // Burmese text, get a Thiha/Nilar MP3 back, cut it into the video
+  // himself in CapCut. 'video' is the old full pipeline (Whisper).
+  const [tab, setTab] = useState<'text' | 'video'>('text');
+  // Text-to-Voice state (no video, no Whisper — just /api/tts).
+  const [textInput, setTextInput] = useState('');
+  const [textBusy, setTextBusy] = useState(false);
+  const [textError, setTextError] = useState('');
+  const [textUrl, setTextUrl] = useState('');
+  const [textEngine, setTextEngine] = useState<TtsEngine | null>(null);
+  const textBlobRef = useRef<Blob | null>(null);
+  const textUrlRef = useRef('');
   const [file, setFile] = useState<File | null>(null);
   const [videoUrl, setVideoUrl] = useState('');
   const [duration, setDuration] = useState(0);
@@ -70,6 +82,7 @@ export default function Home() {
     setHistory(loadHistory());
     return () => {
       if (voiceoverUrlRef.current) URL.revokeObjectURL(voiceoverUrlRef.current);
+      if (textUrlRef.current) URL.revokeObjectURL(textUrlRef.current);
     };
   }, []);
 
@@ -265,6 +278,37 @@ export default function Home() {
     }
   };
 
+  const runTextToVoice = async () => {
+    const text = textInput.trim();
+    if (!text || textBusy) return;
+    if (text.length > 5000) {
+      setTextError('စာရှည်လွန်းတယ် — တစ်ခါကို စာလုံး 5000 အထိပဲ။ အပိုင်းခွဲပြီး တစ်ပိုင်းချင်း ထုတ်ပါ။');
+      return;
+    }
+    setTextBusy(true);
+    setTextError('');
+    setTextEngine(null);
+    try {
+      // Same server voice as the video pipeline — Edge Thiha/Nilar,
+      // no Whisper, no model download, so it works on a phone in seconds.
+      const res = await synthesizeViaServer(text, voice);
+      if (textUrlRef.current) URL.revokeObjectURL(textUrlRef.current);
+      textBlobRef.current = res.blob;
+      const url = URL.createObjectURL(res.blob);
+      textUrlRef.current = url;
+      setTextUrl(url);
+      setTextEngine(res.engine);
+    } catch (e) {
+      setTextError(
+        e instanceof Error
+          ? `မြန်မာအသံ ထုတ်မရပါ — ${e.message}`
+          : 'မြန်မာအသံ ထုတ်မရပါ — အင်တာနက်စစ်ပြီး ပြန်စမ်းပါ',
+      );
+    } finally {
+      setTextBusy(false);
+    }
+  };
+
   const openHistory = (item: HistoryItem) => {
     setResult({
       ...item,
@@ -280,10 +324,118 @@ export default function Home() {
     <div className="container">
       <header>
         <h1>🎬 Movie Translate</h1>
-        <p>တရုတ် Video တင်လိုက် → မြန်မာ AI အသံ + မြန်မာစာတန်းထိုး ပြန်ရမယ်</p>
-        <p className="muted">Whisper + ဘာသာပြန်က ဖုန်းထဲမှာ လုပ်တယ် — မြန်မာအသံကို server (Vercel) က ထုတ်ပေးတယ်၊ API key မလို</p>
+        <p>မြန်မာစာရိုက်လိုက် → Thiha / Nilar အသံ MP3 ပြန်ရမယ် — ပြီးရင် ဗီဒီယိုထဲ ကိုယ်တိုင် cut လုပ်ထည့်ရုံပဲ</p>
+        <p className="muted">Whisper မလို၊ model download မလို — စာကနေ အသံထုတ်တာက ဖုန်းနဲ့တောင် စက္ကန့်ပိုင်းပဲ ကြာတယ်</p>
       </header>
 
+      <div className="tab-row">
+        <button
+          type="button"
+          className={tab === 'text' ? 'tab active' : 'tab'}
+          onClick={() => setTab('text')}
+        >
+          🎙️ စာကနေ အသံ
+        </button>
+        <button
+          type="button"
+          className={tab === 'video' ? 'tab active' : 'tab'}
+          onClick={() => setTab('video')}
+        >
+          🎬 ဗီဒီယိုကနေ ဘာသာပြန်
+        </button>
+      </div>
+
+      {tab === 'text' && (
+        <div className="card">
+          <h2>မြန်မာစာ ရိုက်ထည့်ပါ</h2>
+          <textarea
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder={'ဥပမာ — မင်္ဂလာပါ။ ဒီနေ့ ဇာတ်လမ်းလေးကို ပြန်ပြောပြမယ်။\nသူက အိမ်ပြန်လာတော့ တံခါးကို ဖွင့်လိုက်တယ်။'}
+            rows={8}
+          />
+          <p className="muted">
+            {textInput.length} / 5000 စာလုံး
+            {textInput.length > 5000 ? ' — ရှည်လွန်းတယ်၊ အပိုင်းခွဲပါ' : ''}
+          </p>
+
+          <label>အသံ / Voice (မြန်မာ)</label>
+          <div className="radio-row">
+            <label>
+              <input
+                type="radio"
+                checked={voice === 'my-MM-ThihaNeural'}
+                onChange={() => setVoice('my-MM-ThihaNeural')}
+              />
+              Thiha (ကျား) — default
+            </label>
+            <label>
+              <input
+                type="radio"
+                checked={voice === 'my-MM-NilarNeural'}
+                onChange={() => setVoice('my-MM-NilarNeural')}
+              />
+              Nilar (မ)
+            </label>
+          </div>
+
+          <button disabled={!textInput.trim() || textBusy} onClick={() => void runTextToVoice()}>
+            {textBusy ? 'အသံ ထုတ်နေတယ်…' : 'အသံ ထုတ်မယ် ▶'}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={textBusy}
+            onClick={() =>
+              setTextInput('မင်္ဂလာပါ။ ဒီနေ့ ဇာတ်လမ်းလေးကို ပြန်ပြောပြမယ်။')
+            }
+          >
+            နမူနာစာ ထည့်မယ်
+          </button>
+          {textError && <div className="error">⚠️ {textError}</div>}
+
+          {textUrl && textEngine && (
+            <>
+              <span className="badge">အသံ: {engineLabel(textEngine)}</span>
+              {textEngine === 'google-tts' && (
+                <p className="hint">
+                  ⚠️ ဒီအသံက Google TTS fallback ပါ — server မှာ Edge
+                  (Thiha/Nilar) မရလို့ပါ။ ပြန်စမ်းကြည့်ပါ။
+                </p>
+              )}
+              <audio src={textUrl} controls />
+              <div>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    if (textBlobRef.current) {
+                      const name =
+                        voice === 'my-MM-ThihaNeural' ? 'thiha' : 'nilar';
+                      downloadBlob(textBlobRef.current, `${name}-voiceover.mp3`);
+                    }
+                  }}
+                >
+                  ⬇ အသံ MP3 ဆွဲမယ်
+                </button>
+                <button
+                  className="secondary"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(textInput).catch(() => undefined);
+                  }}
+                >
+                  📋 စာသား ကူးမယ်
+                </button>
+              </div>
+              <p className="hint">
+                MP3 ဆွဲပြီးရင် CapCut ထဲ ဗီဒီယိုဖွင့် → Audio → Extracted/Import
+                ကနေ ဒီ MP3 ကို ထည့်၊ စကားပြောတဲ့နေရာနဲ့ ကိုက်အောင် ဖြတ်/ဆွဲလိုက်ရုံပဲ။
+              </p>
+            </>
+          )}
+        </div>
+      )}
+
+      {tab === 'video' && (
       <div className="card">
         <h2>1. ဗီဒီယို တင်ပါ</h2>
         <input
@@ -395,6 +547,7 @@ export default function Home() {
         {log.length > 0 && <div className="log">{log.join('\n')}</div>}
         {error && <div className="error">⚠️ {error}</div>}
       </div>
+      )}
 
       {result && (
         <div className="card">
@@ -507,6 +660,9 @@ export default function Home() {
       <div className="card">
         <h2>သတိပြုရန်</h2>
         <p className="hint">
+          • <b>စာကနေ အသံ</b> — Whisper မလို၊ model download မလို။ စာရိုက်လိုက် →
+          Thiha/Nilar MP3 ပြန်ရမယ်။ တစ်ခါကို စာလုံး 5000 အထိ။
+          <br />
           • Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (tiny ~75MB,
           base ~145MB)၊ ပြီးရင် browser ထဲ cache ဖြစ်သွားမယ် — download
           လုပ်နေတုန်း screen မပိတ်၊ app မပြောင်းပါနဲ့။
