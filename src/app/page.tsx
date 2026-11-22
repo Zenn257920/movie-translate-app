@@ -123,15 +123,29 @@ export default function Home() {
       const chunks = chunkAudio(audio);
       pushLog(`2/5 Whisper — အပိုင်း ${chunks.length} ခု`);
       const lang = sourceLang === 'zh' ? 'chinese' : 'english';
+      // Throttle the model-download log: the worker reports progress
+      // many times a second, and logging every one floods the log box
+      // (the screenshot showed a wall of "model download model 8583%").
+      // Only log when the percent moved >= 5% or the file changed.
+      let lastLoggedPct = -10;
+      let lastLoggedFile = '';
       const transcribed = await transcribeChunks(
         chunks,
         model,
         lang,
         (done, total, detail) => {
           if (detail?.startsWith('model')) {
-            const m = detail.match(/(\d+)%/);
-            setPercent(m ? Math.round(Number(m[1]) * 0.3) : 15);
-            pushLog(`model download ${detail}`);
+            const m = detail.match(/(\d+(?:\.\d+)?)%/);
+            const pct = m ? Number(m[1]) : 0;
+            // pct is per-file 0-100 (fixed in the worker) — map the
+            // download stage to 0-30% of the whole pipeline, clamped.
+            setPercent(Math.max(0, Math.min(30, Math.round(pct * 0.3))));
+            const filePart = detail.split(' — ')[1] ?? '';
+            if (Math.abs(pct - lastLoggedPct) >= 5 || filePart !== lastLoggedFile) {
+              lastLoggedPct = pct;
+              lastLoggedFile = filePart;
+              pushLog(detail);
+            }
           } else {
             setPercent(10 + Math.round((done / total) * 30));
             if (detail) pushLog(detail);
@@ -280,7 +294,7 @@ export default function Home() {
         />
         <p className="hint">
           ၃ မိနစ်အထိပဲ — ပထမအကြိမ် စမ်းရင် ၁ မိနစ်အောက် အတိုလေးနဲ့ စမ်းပါ။
-          Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~150MB)၊ အင်တာနက်လိုတယ်။
+          Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (tiny ~75MB)၊ WiFi လိုတယ်။
         </p>
         {videoUrl && (
           <>
@@ -357,9 +371,14 @@ export default function Home() {
           value={model}
           onChange={(e) => setModel(e.target.value as WhisperModel)}
         >
-          <option value="Xenova/whisper-tiny">tiny — မြန်တယ်၊ အတိုလေးတွေအတွက်</option>
-          <option value="Xenova/whisper-base">base — ပိုတိကျတယ်၊ နှေးတယ်</option>
+          <option value="Xenova/whisper-tiny">tiny — မြန်တယ်၊ ဖုန်းအတွက် အကောင်းဆုံး (~75MB)</option>
+          <option value="Xenova/whisper-base">base — ပိုတိကျတယ်၊ WiFi ပဲသုံးပါ (~145MB၊ ပထမအကြိမ် 5-10 မိနစ်ကြာနိုင်)</option>
         </select>
+        <p className="hint">
+          ⚠️ ပထမအကြိမ် model download လုပ်ရမယ် — tiny ~75MB၊ base ~145MB။
+          ဖုန်းနဲ့ဆို tiny ကိုသုံး၊ WiFi နဲ့လုပ်ပြီး screen မပိတ်၊ app မပြောင်းပါနဲ့။
+          တစ်ခါ download ပြီးရင် browser ထဲ cache ဖြစ်ပြီး နောက်တစ်ခါ မြန်သွားမယ်။
+        </p>
 
         <button disabled={!file || busy} onClick={() => void runPipeline()}>
           {busy ? 'လုပ်နေတယ်…' : 'စတင်ဘာသာပြန်မယ် ▶'}
@@ -488,8 +507,9 @@ export default function Home() {
       <div className="card">
         <h2>သတိပြုရန်</h2>
         <p className="hint">
-          • Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~150MB)၊ ပြီးရင်
-          browser ထဲ cache ဖြစ်သွားမယ်။
+          • Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (tiny ~75MB,
+          base ~145MB)၊ ပြီးရင် browser ထဲ cache ဖြစ်သွားမယ် — download
+          လုပ်နေတုန်း screen မပိတ်၊ app မပြောင်းပါနဲ့။
           <br />
           • မြန်မာအသံကို server (Vercel, /api/tts) က ထုတ်ပေးတယ် — Microsoft
           Edge TTS (Thiha/Nilar) အရင်၊ မရရင် Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ

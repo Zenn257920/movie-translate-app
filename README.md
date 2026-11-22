@@ -60,7 +60,7 @@ Azure ကျောင်းသားအကောင့် (Myanmar မပါ) �
 ## ကန့်သတ်ချက်များ / Limits
 
 - **No API keys, no secrets** — Edge TTS မှာ သုံးတဲ့ `TrustedClientToken` က Edge browser ကိုယ်တိုင်မှာ ပါတဲ့ public constant ပါ၊ private key မဟုတ်ဘူး။ အသံကို Vercel server (`/api/tts`, Node runtime, 60s) က ထုတ်ပေးတယ် — static export မဟုတ်တော့ဘူး
-- Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~150MB tiny, ~290MB base) — အင်တာနက်လိုတယ်
+- Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~75MB tiny, ~145MB base, quantized) — WiFi လိုတယ်၊ ဖုန်းနဲ့ဆို tiny သုံး၊ download ပြီးရင် cache ဖြစ်တယ်
 - Video ၃ မိနစ်အထိပဲ — အရှည်ကြီးတွေ ဖုန်းနဲ့ လုပ်ရင် အရမ်းနှေးမယ်
 - Edge TTS က Microsoft ရဲ့ တရားဝင် API မဟုတ်ဘဲ Edge browser သုံးတဲ့ consumer endpoint ပါ — Microsoft က ပြောင်းလဲသွားနိုင်တယ်၊ အဲဒီအခါ fallback အသံပဲ ရမယ်
 - Recap mode မှာ SRT က မူရင်းစကားပြောရဲ့ စာတန်းထိုးပါ — recap အသံနဲ့ အချိန်မကိုက်ပါ။ Line-by-line mode မှာတော့ SRT နဲ့ အသံ ကိုက်ပါတယ်

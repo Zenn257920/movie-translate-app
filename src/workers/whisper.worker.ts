@@ -27,12 +27,29 @@ async function load(model: string) {
     model,
     {
       progress_callback: (p: unknown) => {
-        const prog = p as { status?: string; progress?: number; file?: string };
+        const prog = p as {
+          status?: string;
+          progress?: number;
+          file?: string;
+          loaded?: number;
+          total?: number;
+        };
+        // NOTE: @xenova/transformers already reports progress as 0-100
+        // PER FILE (see hub.js readResponse: (loaded/total)*100).
+        // Do NOT multiply by 100 again — that was the "8583%" bug.
+        // Pass loaded/total through so the UI can show MB.
+        const pct =
+          typeof prog.progress === 'number'
+            ? Math.max(0, Math.min(100, prog.progress))
+            : 0;
         ctx.postMessage({
           type: 'progress',
           id: 'init',
-          percent: Math.round((prog.progress ?? 0) * 100),
+          percent: Math.round(pct * 10) / 10,
           detail: prog.file ? `${prog.status ?? ''} ${prog.file}` : prog.status,
+          loaded: prog.loaded,
+          total: prog.total,
+          file: prog.file,
         });
       },
     } as never,

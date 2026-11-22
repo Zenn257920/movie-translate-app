@@ -20,6 +20,9 @@ interface WorkerMsg {
   detail?: string;
   text?: string;
   message?: string;
+  loaded?: number;
+  total?: number;
+  file?: string;
 }
 
 function transcribeOnMainThread(
@@ -72,18 +75,69 @@ export async function transcribeChunks(
   try {
     await new Promise<void>((resolve, reject) => {
       const w = worker as Worker;
+      // Total budget 10 min (was 120s — too short for a ~75-145 MB model
+      // on a phone connection), but give up if NO progress at all for
+      // 3 min, so a stalled download does not hang forever. The idle
+      // timer resets on every progress message.
+      const TOTAL_MS = 600_000;
+      const IDLE_MS = 180_000;
+      const startedAt = Date.now();
+      let idleTimer: ReturnType<typeof setTimeout> | undefined;
+      let done = false;
+      const fail = (err: Error) => {
+        if (done) return;
+        done = true;
+        if (idleTimer) clearTimeout(idleTimer);
+        w.removeEventListener('message', onMsg as EventListener);
+        reject(err);
+      };
+      const armIdleTimer = () => {
+        if (idleTimer) clearTimeout(idleTimer);
+        idleTimer = setTimeout(() => {
+          const elapsed = Math.round((Date.now() - startedAt) / 1000);
+          fail(
+            new Error(
+              `Whisper model download ရပ်နေတယ် — ${elapsed} စက္ကန့်အတွင်း တိုးတက်မှု မရှိပါ။ WiFi နဲ့ tiny model နဲ့ ပြန်စမ်းပါ`,
+            ),
+          );
+        }, IDLE_MS);
+      };
+      const totalTimer = setTimeout(() => {
+        fail(
+          new Error(
+            'Whisper model load timeout (10 မိနစ်) — model download မပြီးသေးပါ။ WiFi နဲ့ tiny model (~75MB) နဲ့ ပြန်စမ်းပါ၊ base (~145MB) က ဖုန်းနဲ့ အရမ်းကြီးပါတယ်',
+          ),
+        );
+      }, TOTAL_MS);
       const onMsg = (e: MessageEvent<WorkerMsg>) => {
         const m = e.data;
-        if (m.type === 'ready') resolve();
-        else if (m.type === 'error' && m.id === 'init')
-          reject(new Error(m.message ?? 'worker init failed'));
-        else if (m.type === 'progress' && m.id === 'init') {
-          onProgress(0, chunks.length, `model ${(m.percent ?? 0)}%`);
+        if (m.type === 'ready') {
+          if (done) return;
+          done = true;
+          clearTimeout(totalTimer);
+          if (idleTimer) clearTimeout(idleTimer);
+          w.removeEventListener('message', onMsg as EventListener);
+          resolve();
+        } else if (m.type === 'error' && m.id === 'init') {
+          clearTimeout(totalTimer);
+          fail(new Error(m.message ?? 'worker init failed'));
+        } else if (m.type === 'progress' && m.id === 'init') {
+          armIdleTimer();
+          const pct = m.percent ?? 0;
+          // Show MB when the worker reports them, e.g.
+          // "model 85.8% — model_quantized.onnx — 64.2/75.0 MB"
+          // (percent is per-file, 0-100 — already fixed in the worker).
+          let detail = `model ${pct}%`;
+          if (m.file) detail += ` — ${m.file}`;
+          if (typeof m.loaded === 'number' && typeof m.total === 'number' && m.total > 0) {
+            detail += ` — ${(m.loaded / 1024 / 1024).toFixed(1)}/${(m.total / 1024 / 1024).toFixed(1)} MB`;
+          }
+          onProgress(0, chunks.length, detail);
         }
       };
       w.addEventListener('message', onMsg as EventListener);
+      armIdleTimer();
       w.postMessage({ type: 'init', model });
-      setTimeout(() => reject(new Error('Whisper model load timeout (120s)')), 120_000);
     });
 
     for (let i = 0; i < chunks.length; i++) {
