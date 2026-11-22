@@ -4,10 +4,8 @@ import { useEffect, useRef, useState } from 'react';
 import { chunkAudio, extractAudio16k, getVideoDuration } from '@/lib/audio';
 import {
   engineLabel,
-  splitForTts,
   speakWithBrowser,
-  synthesizeEdge,
-  synthesizeGoogleChunk,
+  synthesizeViaServer,
 } from '@/lib/edgeTts';
 import { buildLineScript, buildRecapScript, buildSrt } from '@/lib/recap';
 import { translateSegments } from '@/lib/translate';
@@ -179,48 +177,34 @@ export default function Home() {
       const srtMy = buildSrt(merged);
       setPercent(70);
 
-      // 5. Voiceover — Edge TTS first (Thiha/Nilar), then fallbacks.
-      setStage('မြန်မာအသံ ထုတ်နေတယ်…');
-      pushLog('4/5 မြန်မာအသံ ထုတ်နေတယ်…');
+      // 5. Voiceover — made on the server (POST /api/tts): Edge TTS
+      // (Thiha/Nilar) first, Google fallback on the server. The phone
+      // browser could not reach either service directly, so the server
+      // does it and the phone only downloads the finished MP3.
+      setStage('မြန်မာအသံ ထုတ်နေတယ်… (server က ထုတ်ပေးနေတယ်)');
+      pushLog('4/5 မြန်မာအသံ ထုတ်နေတယ်… (server)');
       let voiceoverUrl = '';
       let engine: TtsEngine =
         voice === 'my-MM-ThihaNeural' ? 'edge-thiha' : 'edge-nilar';
       let downloadable = true;
       try {
-        const res = await synthesizeEdge(scriptMy, voice, (done, total) =>
-          setPercent(70 + Math.round((done / total) * 25)),
-        );
+        const res = await synthesizeViaServer(scriptMy, voice);
         voiceoverUrl = URL.createObjectURL(res.blob);
         engine = res.engine;
+        setPercent(95);
         pushLog(`အသံ ရပြီ — ${engineLabel(engine)}`);
-      } catch (edgeErr) {
+      } catch (serverErr) {
         pushLog(
-          `Edge TTS မရပါ (${edgeErr instanceof Error ? edgeErr.message : 'error'}) — Google TTS fallback စမ်းမယ်`,
+          `Server အသံ မရပါ (${serverErr instanceof Error ? serverErr.message : 'error'}) — browser အသံနဲ့ ဖွင့်ပြမယ် (download မရပါ)`,
         );
         try {
-          const parts: ArrayBuffer[] = [];
-          const pieces = splitForTts(scriptMy);
-          for (let i = 0; i < pieces.length; i++) {
-            parts.push(await synthesizeGoogleChunk(pieces[i]));
-            setPercent(70 + Math.round(((i + 1) / pieces.length) * 25));
-          }
-          const total = parts.reduce((n, p) => n + p.byteLength, 0);
-          const out = new Uint8Array(total);
-          let off = 0;
-          for (const p of parts) {
-            out.set(new Uint8Array(p), off);
-            off += p.byteLength;
-          }
-          voiceoverUrl = URL.createObjectURL(
-            new Blob([out.buffer], { type: 'audio/mpeg' }),
-          );
-          engine = 'google-tts';
-          pushLog('အသံ ရပြီ — Google TTS (fallback) — ဒီအသံကို မကြိုက်ရင် Edge ပြန်စမ်းပါ');
-        } catch {
-          pushLog('Google TTS လည်း မရပါ — browser အသံနဲ့ ဖွင့်ပြမယ် (download မရပါ)');
           await speakWithBrowser(scriptMy);
           engine = 'speech-synthesis';
           downloadable = false;
+        } catch {
+          throw new Error(
+            `မြန်မာအသံ ထုတ်မရပါ — ${serverErr instanceof Error ? serverErr.message : 'server error'} — အင်တာနက်စစ်ပြီး ပြန်စမ်းပါ`,
+          );
         }
       }
 
@@ -283,7 +267,7 @@ export default function Home() {
       <header>
         <h1>🎬 Movie Translate</h1>
         <p>တရုတ် Video တင်လိုက် → မြန်မာ AI အသံ + မြန်မာစာတန်းထိုး ပြန်ရမယ်</p>
-        <p className="muted">ဖုန်းထဲမှာတင် လုပ်တယ် — server မရှိ၊ API key မလို</p>
+        <p className="muted">Whisper + ဘာသာပြန်က ဖုန်းထဲမှာ လုပ်တယ် — မြန်မာအသံကို server (Vercel) က ထုတ်ပေးတယ်၊ API key မလို</p>
       </header>
 
       <div className="card">
@@ -399,8 +383,8 @@ export default function Home() {
           <span className="badge">အသံ: {result.engineLabel}</span>
           {result.engine === 'google-tts' && (
             <p className="hint">
-              ⚠️ ဒီအသံက Google TTS fallback ပါ — Thiha/Nilar မရလို့ပါ။ Edge TTS
-              ပြန်ရအောင် အင်တာနက်စစ်ပြီး ပြန်စမ်းပါ။
+              ⚠️ ဒီအသံက Google TTS fallback ပါ — server မှာ Edge (Thiha/Nilar)
+              မရလို့ပါ။ ပြန်စမ်းကြည့်ပါ၊ မရသေးရင် ခဏစောင့်ပြီးမှ ပြန်လုပ်ပါ။
             </p>
           )}
           {result.engine === 'speech-synthesis' && (
@@ -506,6 +490,10 @@ export default function Home() {
         <p className="hint">
           • Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~150MB)၊ ပြီးရင်
           browser ထဲ cache ဖြစ်သွားမယ်။
+          <br />
+          • မြန်မာအသံကို server (Vercel, /api/tts) က ထုတ်ပေးတယ် — Microsoft
+          Edge TTS (Thiha/Nilar) အရင်၊ မရရင် Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ
+          တိုက်ရိုက်ခေါ်တာ မရလို့ server ကို ပြောင်းထားတာ။
           <br />
           • Edge TTS က Microsoft ရဲ့ တရားဝင် API မဟုတ်ဘဲ Edge browser သုံးတဲ့
           consumer endpoint ပါ — key မလိုဘူး၊ ဒါပေမယ့် Microsoft က ပြောင်းလဲသွားနိုင်တယ်။

@@ -11,12 +11,12 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 4. **စတင်ဘာသာပြန်မယ်** ကို နှိပ်ပါ
 5. ရလဒ် — အသံကို နားထောင်မယ်၊ MP3 ဆွဲမယ်၊ SRT ဆွဲမယ်၊ Script ကူးမယ်
 
-## အလုပ်လုပ်ပုံ / How it works (all in the browser)
+## အလုပ်လုပ်ပုံ / How it works
 
-1. **Audio** — `AudioContext.decodeAudioData` နဲ့ ဗီဒီယိုထဲက အသံကို 16kHz mono အဖြစ် ထုတ်တယ်
+1. **Audio** — `AudioContext.decodeAudioData` နဲ့ ဗီဒီယိုထဲက အသံကို 16kHz mono အဖြစ် ထုတ်တယ် (browser ထဲမှာ)
 2. **Transcribe** — Whisper (`@xenova/transformers`, tiny/base) ကို Web Worker ထဲမှာ run တယ် — model က HuggingFace CDN ကနေ လာတယ်, browser ထဲ cache ဖြစ်တယ်
 3. **Translate** — တရုတ် → မြန်မာ ကို Google Translate free endpoint (`translate.googleapis.com`, key မလို) နဲ့ ပြန်တယ်
-4. **Voiceover** — Microsoft **Edge TTS** ကို browser ကနေတိုက်ရိုက် ခေါ်တယ် (key မလို) — `my-MM-ThihaNeural` / `my-MM-NilarNeural`
+4. **Voiceover** — မြန်မာ အသံကို **server** (`POST /api/tts`, Vercel) က ထုတ်ပေးတယ် — Microsoft **Edge TTS** အရင် (`my-MM-ThihaNeural` / `my-MM-NilarNeural`)၊ မရရင် server-side Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ တိုက်ရိုက်ခေါ်တာ မရလို့ (Edge WebSocket ချိတ်မရ + Google fetch CORS ပိတ်တယ်) server ကို ပြောင်းထားတာ
 5. **Outputs** — Voiceover MP3, Burmese SRT (Whisper timestamps), မြန်မာ script, မူရင်းစာသား
 
 ## အသံ / Voice
@@ -28,7 +28,7 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 
 ## ကန့်သတ်ချက်များ / Limits
 
-- **No server, no API keys, no secrets** — အကုန်လုံး browser ထဲမှာပဲ လုပ်တယ် (Edge TTS မှာ သုံးတဲ့ `TrustedClientToken` က Edge browser ကိုယ်တိုင်မှာ ပါတဲ့ public constant ပါ၊ private key မဟုတ်ဘူး)
+- **No API keys, no secrets** — Edge TTS မှာ သုံးတဲ့ `TrustedClientToken` က Edge browser ကိုယ်တိုင်မှာ ပါတဲ့ public constant ပါ၊ private key မဟုတ်ဘူး။ အသံကို Vercel server (`/api/tts`, Node runtime, 60s) က ထုတ်ပေးတယ် — static export မဟုတ်တော့ဘူး
 - Whisper model ကို ပထမအကြိမ် download လုပ်ရမယ် (~150MB tiny, ~290MB base) — အင်တာနက်လိုတယ်
 - Video ၃ မိနစ်အထိပဲ — အရှည်ကြီးတွေ ဖုန်းနဲ့ လုပ်ရင် အရမ်းနှေးမယ်
 - Edge TTS က Microsoft ရဲ့ တရားဝင် API မဟုတ်ဘဲ Edge browser သုံးတဲ့ consumer endpoint ပါ — Microsoft က ပြောင်းလဲသွားနိုင်တယ်၊ အဲဒီအခါ fallback အသံပဲ ရမယ်
@@ -40,8 +40,8 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 
 ```bash
 npm install
-npm run dev     # http://localhost:3000
-npm run build   # static export -> out/
+npm run dev     # http://localhost:3000 (API route /api/tts အပါအဝင်)
+npm run build   # Vercel deploy — API routes ပါလို့ static export မဟုတ်ဘူး
 ```
 
-Deploy the `out/` folder to any static host (Vercel, Netlify, GitHub Pages).
+Deploy: Vercel မှာ GitHub repo ကို import လုပ်ပြီး Deploy နှိပ်ရုံပဲ (env var မလို)။
