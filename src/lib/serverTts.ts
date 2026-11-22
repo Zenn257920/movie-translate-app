@@ -16,18 +16,22 @@
  * Translate TTS last. The caller reports the real provider via
  * X-TTS-Provider.
  *
- * Edge handshake (kept in sync with rany2/edge-tts): since ~Oct 2024
+ * Edge handshake (kept in sync with rany2/edge-tts 7.3.0+): since ~Oct 2024
  * (edge-tts issue #290) the endpoint 403s any handshake that lacks the
- * Sec-MS-GEC token — SHA-256 of the Windows file-time (floored to 5
- * minutes) concatenated with the TrustedClientToken — plus a
- * Sec-MS-GEC-Version whose floor Microsoft raises over time (below
- * 1-133 now 403s). The User-Agent's Edg/ version must match that
- * version. Sending only TrustedClientToken (as this code did before)
- * is why Edge failed even from Vercel and everything fell back to
- * Google.
+ * Sec-MS-GEC token, and since ~Nov 2025 it requires the v2 token
+ * (edge-tts release 7.3.0, commit ba61d94): `Sec-MS-GEC-Version: 2-...`
+ * plus a token value in the form `<CS64>-<SHA256>` produced by the
+ * custom DRM hash in ./edgeGecV2 (a tweaked SHA-256 variant + CS64
+ * checksum — plain SHA-256 gives a different digest and still 403s).
+ * The hash INPUT is unchanged from v1: Windows file-time ticks floored
+ * to 5 minutes concatenated with the TrustedClientToken. The User-Agent's
+ * Edg/ version must match the Sec-MS-GEC-Version's Chromium version.
+ * Sending only TrustedClientToken, or a v1 token, is why Edge failed
+ * even from Vercel and everything fell back to Google.
  */
 import WebSocket from 'ws';
-import { createHash, randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomUUID } from 'node:crypto';
+import { generateSecMsGecV2 } from './edgeGecV2';
 
 export type ServerVoice = 'thiha' | 'nilar';
 export type ServerProvider = 'azure' | 'elevenlabs' | 'edge' | 'google';
@@ -49,33 +53,17 @@ const WS_BASE =
 // disagree, so this constant is the single source for both. Bump it to
 // a current Edge version if handshakes start 403ing again.
 const CHROMIUM_FULL_VERSION = '143.0.3650.75';
-const SEC_MS_GEC_VERSION = `1-${CHROMIUM_FULL_VERSION}`;
+// v2 since edge-tts 7.3.0 — Microsoft now rejects the v1 (`1-...`) token.
+const SEC_MS_GEC_VERSION = `2-${CHROMIUM_FULL_VERSION}`;
 
 const EDGE_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0';
 // Origin of the Edge Read Aloud extension (what edge-tts sends).
-const EDGE_ORIGIN = 'chrome-extension://jdiccldimpdaibmpoljnfkkaacifdlj';
+const EDGE_ORIGIN = 'chrome-extension://jdiccldimpdaibmpdkjnbmckianbfold';
 
-/**
- * Sec-MS-GEC: uppercase hex SHA-256 of
- * "<windows file-time ticks floored to 5 minutes><TrustedClientToken>".
- * Ticks exceed Number.MAX_SAFE_INTEGER, so this uses BigInt — float math
- * would silently lose precision on the ~1.3e17 tick value.
- */
-function generateSecMsGec(): string {
-  const unixSeconds = BigInt(Math.floor(Date.now() / 1000));
-  const winSeconds = unixSeconds + 11_644_473_600n; // 1601-01-01 -> 1970-01-01
-  const floored = winSeconds - (winSeconds % 300n);
-  const ticks = floored * 10_000_000n; // seconds -> 100ns intervals
-  return createHash('sha256')
-    .update(`${ticks.toString()}${TRUSTED_TOKEN}`, 'ascii')
-    .digest('hex')
-    .toUpperCase();
-}
-
-/** Fresh 32-hex muid cookie per connection, as edge-tts sends. */
+/** Fresh 32-hex MUID per connection, uppercase, as edge-tts sends. */
 function generateMuid(): string {
-  return randomBytes(16).toString('hex');
+  return randomBytes(16).toString('hex').toUpperCase();
 }
 
 /** X-Timestamp in the format edge-tts sends, day zero-padded. */
@@ -158,7 +146,7 @@ function synthesizeEdgeChunkOnce(
     const connectionId = randomUUID().replace(/-/g, '');
     const url =
       `${WS_BASE}?TrustedClientToken=${TRUSTED_TOKEN}` +
-      `&Sec-MS-GEC=${generateSecMsGec()}` +
+      `&Sec-MS-GEC=${generateSecMsGecV2()}` +
       `&Sec-MS-GEC-Version=${SEC_MS_GEC_VERSION}` +
       `&ConnectionId=${connectionId}`;
     let ws: WebSocket;
@@ -167,11 +155,11 @@ function synthesizeEdgeChunkOnce(
         headers: {
           'User-Agent': EDGE_UA,
           Origin: EDGE_ORIGIN,
-          'Accept-Encoding': 'gzip, deflate, br',
+          'Accept-Encoding': 'gzip, deflate, br, zstd',
           'Accept-Language': 'en-US,en;q=0.9',
           Pragma: 'no-cache',
           'Cache-Control': 'no-cache',
-          Cookie: `muid=${generateMuid()}`,
+          Cookie: `muid=${generateMuid()};`,
         },
       });
     } catch (e) {
@@ -223,7 +211,8 @@ function synthesizeEdgeChunkOnce(
       const ssml =
         `X-RequestId:${connectionId}\r\n` +
         'Content-Type:application/ssml+xml\r\n' +
-        `X-Timestamp:${edgeTimestamp()}\r\n` +
+        // Upstream appends a trailing "Z" here (an Edge bug it preserves).
+        `X-Timestamp:${edgeTimestamp()}Z\r\n` +
         'Path:ssml\r\n\r\n' +
         `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='my-MM'>` +
         `<voice name='${voiceName}'><prosody rate='+0%' pitch='+0Hz'>${escapeXml(text)}</prosody></voice></speak>`;
