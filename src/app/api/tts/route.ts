@@ -1,7 +1,8 @@
 /**
  * POST /api/tts — Burmese voiceover, generated on the server (Vercel).
  *
- * Body: { text: string, voice?: 'thiha' | 'nilar' }  (thiha = default)
+ * Body: { text: string, voice?: 'thiha' | 'nilar', rate?: '+0%' | '+15%' | '+30%' }
+ *   (thiha = default, rate '+0%' = natural pace)
  * Success: MP3 bytes, Content-Type audio/mpeg,
  *   X-TTS-Provider: 'azure' (Thiha/Nilar via Azure Speech key),
  *   'elevenlabs' (ElevenLabs voice speaking Burmese, via API key),
@@ -12,7 +13,7 @@
  * Google TTS (CORS), so the server does it instead and the phone only
  * downloads the finished MP3.
  */
-import { synthesizeBurmese, type ServerVoice } from '@/lib/serverTts';
+import { synthesizeBurmese, TTS_RATES, type ServerVoice, type TtsRate } from '@/lib/serverTts';
 
 export const runtime = 'nodejs';
 export const maxDuration = 60;
@@ -32,6 +33,11 @@ export async function POST(req: Request) {
       : '';
   const voiceRaw = (body as { voice?: unknown })?.voice;
   const voice: ServerVoice = voiceRaw === 'nilar' ? 'nilar' : 'thiha';
+  const rateRaw = (body as { rate?: unknown })?.rate;
+  const rate: TtsRate =
+    typeof rateRaw === 'string' && (TTS_RATES as string[]).includes(rateRaw)
+      ? (rateRaw as TtsRate)
+      : '+0%';
 
   if (!text) {
     return Response.json({ error: 'text မပါဘူး — အသံထုတ်ဖို့ စာလိုတယ်' }, { status: 400 });
@@ -44,7 +50,7 @@ export async function POST(req: Request) {
   }
 
   try {
-    const { audio, provider } = await synthesizeBurmese(text, voice);
+    const { audio, provider } = await synthesizeBurmese(text, voice, rate);
     return new Response(audio as unknown as BodyInit, {
       status: 200,
       headers: {

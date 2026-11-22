@@ -46,6 +46,10 @@ import { generateSecMsGecV2 } from './edgeGecV2';
 
 export type ServerVoice = 'thiha' | 'nilar';
 export type ServerProvider = 'azure' | 'elevenlabs' | 'edge' | 'google';
+/** Speaking speed, as an SSML prosody rate. '+0%' is Thiha/Nilar's
+ * natural pace; recap narration usually sounds better a bit faster. */
+export type TtsRate = '+0%' | '+15%' | '+30%';
+export const TTS_RATES: TtsRate[] = ['+0%', '+15%', '+30%'];
 
 const VOICE_NAMES: Record<ServerVoice, string> = {
   thiha: 'my-MM-ThihaNeural',
@@ -217,6 +221,7 @@ function synthesizeEdgeChunkOnce(
   text: string,
   voiceName: string,
   timeoutMs: number,
+  rate: TtsRate = '+0%',
 ): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     // Same no-dash id for ConnectionId and X-RequestId, as edge-tts does.
@@ -303,7 +308,7 @@ function synthesizeEdgeChunkOnce(
         `X-Timestamp:${edgeTimestamp()}Z\r\n` +
         'Path:ssml\r\n\r\n' +
         `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>` +
-        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>${escapeXml(text)}</prosody></voice></speak>`;
+        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='${rate}' volume='+0%'>${escapeXml(text)}</prosody></voice></speak>`;
       ws.send(ssml);
     });
 
@@ -350,20 +355,27 @@ function synthesizeEdgeChunkOnce(
 
 /**
  * Edge TTS chunk with one retry: the Read Aloud endpoint is intermittent
- * by nature (403/503 handshakes, turns that end with no audio). Both
- * attempts together stay inside the 25s budget for the chunk.
+ * by nature (403/503 handshakes, turns that end with no audio) and
+ * sometimes a handshake just hangs. The old code gave the FIRST attempt
+ * the whole 25s budget, so a hung first attempt burned the budget and
+ * the retry never ran — a short text then took ~45-57s (measured
+ * 2026-11-22). Now each attempt gets 12s: a hung attempt fails fast
+ * and the retry gets a fresh 12s, so a chunk finishes in ~4s normally
+ * and ~24s worst case.
  */
-async function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
-  const deadline = Date.now() + 25_000;
+async function synthesizeEdgeChunk(
+  text: string,
+  voiceName: string,
+  rate: TtsRate = '+0%',
+): Promise<Buffer> {
+  const ATTEMPT_MS = 12_000;
   let lastErr: Error | undefined;
   for (let attempt = 0; attempt < 2; attempt++) {
-    const remaining = deadline - Date.now();
-    if (remaining <= 1000) break;
     try {
-      return await synthesizeEdgeChunkOnce(text, voiceName, remaining);
+      return await synthesizeEdgeChunkOnce(text, voiceName, ATTEMPT_MS, rate);
     } catch (e) {
       lastErr = e instanceof Error ? e : new Error('Edge TTS မရပါ');
-      if (attempt === 0 && Date.now() < deadline - 1000) {
+      if (attempt === 0) {
         await new Promise((r) => setTimeout(r, 500));
       }
     }
@@ -377,11 +389,12 @@ async function synthesizeAzureChunk(
   voiceName: string,
   key: string,
   region: string,
+  rate: TtsRate = '+0%',
 ): Promise<Buffer> {
   const url = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
   const ssml =
     `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='my-MM'>` +
-    `<voice name='${voiceName}'>${escapeXml(text)}</voice></speak>`;
+    `<voice name='${voiceName}'><prosody rate='${rate}'>${escapeXml(text)}</prosody></voice></speak>`;
   const res = await fetch(url, {
     method: 'POST',
     headers: {
@@ -454,6 +467,7 @@ export interface TtsResult {
 export async function synthesizeBurmese(
   text: string,
   voice: ServerVoice,
+  rate: TtsRate = '+0%',
 ): Promise<TtsResult> {
   // The Edge service errors on C0 control characters (Whisper output can
   // contain them) — upstream replaces them with a space, so do the same.
@@ -468,10 +482,12 @@ export async function synthesizeBurmese(
   if (azureKey && azureRegion) {
     try {
       const chunks = splitForTts(text);
-      const parts: Buffer[] = [];
-      for (const chunk of chunks) {
-        parts.push(await synthesizeAzureChunk(chunk, voiceName, azureKey, azureRegion));
-      }
+      // Chunks in parallel (Promise.all keeps order): a long script
+      // used to take the SUM of all chunks and blow past Vercel's 60s
+      // limit; now it takes roughly the slowest single chunk.
+      const parts = await Promise.all(
+        chunks.map((chunk) => synthesizeAzureChunk(chunk, voiceName, azureKey, azureRegion, rate)),
+      );
       const audio = Buffer.concat(parts);
       if (audio.length === 0) throw new Error('Azure Speech မှ အသံဗလာ ပြန်လာတယ်');
       return { audio, provider: 'azure' };
@@ -497,10 +513,9 @@ export async function synthesizeBurmese(
       (voice === 'nilar' ? 'EXAVITQu4vr4xnSDxMaL' : 'JBFqnCBsd6RMkjVDRZzb');
     try {
       const chunks = splitForTts(text);
-      const parts: Buffer[] = [];
-      for (const chunk of chunks) {
-        parts.push(await synthesizeElevenLabsChunk(chunk, elevenKey, elevenVoiceId));
-      }
+      const parts = await Promise.all(
+        chunks.map((chunk) => synthesizeElevenLabsChunk(chunk, elevenKey, elevenVoiceId)),
+      );
       const audio = Buffer.concat(parts);
       if (audio.length === 0) throw new Error('ElevenLabs မှ အသံဗလာ ပြန်လာတယ်');
       return { audio, provider: 'elevenlabs' };
@@ -516,13 +531,12 @@ export async function synthesizeBurmese(
     }
   }
 
-  // 3. Edge TTS, chunk by chunk.
+  // 3. Edge TTS, chunks in parallel (see Azure note above).
   try {
     const chunks = splitForTts(text);
-    const parts: Buffer[] = [];
-    for (const chunk of chunks) {
-      parts.push(await synthesizeEdgeChunk(chunk, voiceName));
-    }
+    const parts = await Promise.all(
+      chunks.map((chunk) => synthesizeEdgeChunk(chunk, voiceName, rate)),
+    );
     const audio = Buffer.concat(parts);
     if (audio.length === 0) throw new Error('Edge TTS မှ အသံဗလာ ပြန်လာတယ်');
     return { audio, provider: 'edge' };
@@ -533,13 +547,12 @@ export async function synthesizeBurmese(
     // Vercel's function logs. Never includes the Sec-MS-GEC token.
     console.error('[tts] Edge failed:', edgeMsg);
     failures.push(`Edge: ${edgeMsg}`);
-    // 4. Google TTS fallback, server-side.
+    // 4. Google TTS fallback, server-side — chunks in parallel too.
     try {
       const pieces = splitForGoogle(text);
-      const parts: Buffer[] = [];
-      for (const piece of pieces) {
-        parts.push(await synthesizeGoogleChunk(piece));
-      }
+      const parts = await Promise.all(
+        pieces.map((piece) => synthesizeGoogleChunk(piece)),
+      );
       const audio = Buffer.concat(parts);
       if (audio.length === 0) throw new Error('Google TTS မှ အသံဗလာ ပြန်လာတယ်');
       return { audio, provider: 'google' };

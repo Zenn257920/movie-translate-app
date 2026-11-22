@@ -18,16 +18,20 @@ export interface ServerTtsResult {
   engine: TtsEngine;
 }
 
+/** Speaking speed, passed through to /api/tts (SSML prosody rate). */
+export type TtsRate = '+0%' | '+15%' | '+30%';
+
 /** Ask the server for a Burmese voiceover of the full script. */
 export async function synthesizeViaServer(
   script: string,
   voice: VoiceId,
+  rate: TtsRate = '+0%',
 ): Promise<ServerTtsResult> {
   const voiceKey = voice === 'my-MM-NilarNeural' ? 'nilar' : 'thiha';
   const res = await fetch('/api/tts', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ text: script, voice: voiceKey }),
+    body: JSON.stringify({ text: script, voice: voiceKey, rate }),
   });
   if (!res.ok) {
     let detail = `server ${res.status}`;

@@ -6,6 +6,7 @@ import {
   engineLabel,
   speakWithBrowser,
   synthesizeViaServer,
+  type TtsRate,
 } from '@/lib/edgeTts';
 import { buildLineScript, buildRecapScript, buildSrt } from '@/lib/recap';
 import { translateSegments } from '@/lib/translate';
@@ -60,6 +61,11 @@ export default function Home() {
   const [textError, setTextError] = useState('');
   const [textUrl, setTextUrl] = useState('');
   const [textEngine, setTextEngine] = useState<TtsEngine | null>(null);
+  // Speaking speed — Thiha/Nilar's natural pace felt slow for recap
+  // narration, so +15% is the default; +30% is faster still.
+  const [textRate, setTextRate] = useState<TtsRate>('+15%');
+  const [textElapsed, setTextElapsed] = useState(0);
+  const textTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const textBlobRef = useRef<Blob | null>(null);
   const textUrlRef = useRef('');
   const [file, setFile] = useState<File | null>(null);
@@ -83,6 +89,7 @@ export default function Home() {
     return () => {
       if (voiceoverUrlRef.current) URL.revokeObjectURL(voiceoverUrlRef.current);
       if (textUrlRef.current) URL.revokeObjectURL(textUrlRef.current);
+      if (textTimerRef.current) clearInterval(textTimerRef.current);
     };
   }, []);
 
@@ -288,10 +295,15 @@ export default function Home() {
     setTextBusy(true);
     setTextError('');
     setTextEngine(null);
+    setTextElapsed(0);
+    const startedAt = Date.now();
+    textTimerRef.current = setInterval(() => {
+      setTextElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
     try {
       // Same server voice as the video pipeline — Edge Thiha/Nilar,
       // no Whisper, no model download, so it works on a phone in seconds.
-      const res = await synthesizeViaServer(text, voice);
+      const res = await synthesizeViaServer(text, voice, textRate);
       if (textUrlRef.current) URL.revokeObjectURL(textUrlRef.current);
       textBlobRef.current = res.blob;
       const url = URL.createObjectURL(res.blob);
@@ -305,6 +317,10 @@ export default function Home() {
           : 'မြန်မာအသံ ထုတ်မရပါ — အင်တာနက်စစ်ပြီး ပြန်စမ်းပါ',
       );
     } finally {
+      if (textTimerRef.current) {
+        clearInterval(textTimerRef.current);
+        textTimerRef.current = null;
+      }
       setTextBusy(false);
     }
   };
@@ -379,8 +395,36 @@ export default function Home() {
             </label>
           </div>
 
+          <label>အသံအမြန်နှုန်း / Speaking speed</label>
+          <div className="radio-row">
+            <label>
+              <input
+                type="radio"
+                checked={textRate === '+0%'}
+                onChange={() => setTextRate('+0%')}
+              />
+              ပုံမှန်
+            </label>
+            <label>
+              <input
+                type="radio"
+                checked={textRate === '+15%'}
+                onChange={() => setTextRate('+15%')}
+              />
+              မြန်မြန် (+15%) — default
+            </label>
+            <label>
+              <input
+                type="radio"
+                checked={textRate === '+30%'}
+                onChange={() => setTextRate('+30%')}
+              />
+              ပိုမြန် (+30%)
+            </label>
+          </div>
+
           <button disabled={!textInput.trim() || textBusy} onClick={() => void runTextToVoice()}>
-            {textBusy ? 'အသံ ထုတ်နေတယ်…' : 'အသံ ထုတ်မယ် ▶'}
+            {textBusy ? `အသံ ထုတ်နေတယ်… ${textElapsed} စက္ကန့်` : 'အသံ ထုတ်မယ် ▶'}
           </button>
           <button
             type="button"
