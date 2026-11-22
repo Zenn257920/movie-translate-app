@@ -16,7 +16,7 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 1. **Audio** — `AudioContext.decodeAudioData` နဲ့ ဗီဒီယိုထဲက အသံကို 16kHz mono အဖြစ် ထုတ်တယ် (browser ထဲမှာ)
 2. **Transcribe** — Whisper (`@xenova/transformers`, tiny/base) ကို Web Worker ထဲမှာ run တယ် — model က HuggingFace CDN ကနေ လာတယ်, browser ထဲ cache ဖြစ်တယ်
 3. **Translate** — တရုတ် → မြန်မာ ကို Google Translate free endpoint (`translate.googleapis.com`, key မလို) နဲ့ ပြန်တယ်
-4. **Voiceover** — မြန်မာ အသံကို **server** (`POST /api/tts`, Vercel) က ထုတ်ပေးတယ် — Azure Speech key ရှိရင် အရင်ဆုံး Azure (Thiha/Nilar အစစ်)၊ ပြီးရင် Microsoft **Edge TTS** (`my-MM-ThihaNeural` / `my-MM-NilarNeural`)၊ မရရင် server-side Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ တိုက်ရိုက်ခေါ်တာ မရလို့ (Edge WebSocket ချိတ်မရ + Google fetch CORS ပိတ်တယ်) server ကို ပြောင်းထားတာ
+4. **Voiceover** — မြန်မာ အသံကို **server** (`POST /api/tts`, Vercel) က ထုတ်ပေးတယ် — Azure Speech key ရှိရင် အရင်ဆုံး Azure (Thiha/Nilar အစစ်)၊ ပြီးရင် ElevenLabs key ရှိရင် ElevenLabs (ElevenLabs အသံနဲ့ မြန်မာစကား)၊ ပြီးရင် Microsoft **Edge TTS** (`my-MM-ThihaNeural` / `my-MM-NilarNeural`)၊ မရရင် server-side Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ တိုက်ရိုက်ခေါ်တာ မရလို့ (Edge WebSocket ချိတ်မရ + Google fetch CORS ပိတ်တယ်) server ကို ပြောင်းထားတာ
 5. **Outputs** — Voiceover MP3, Burmese SRT (Whisper timestamps), မြန်မာ script, မူရင်းစာသား
 
 ## အသံ / Voice
@@ -41,6 +41,21 @@ Edge TTS က Vercel server ကတောင် ချိတ်မရတတ်လ�
 6. စမ်းပါ — အသံထုတ်တိုင်း provider က `azure` လို့ ပြရင် Thiha အသံအစစ် ရပြီ
 
 Key မထည့်ထားရင်လည်း app က ဆက်အလုပ်လုပ်ပါတယ် — Edge → Google fallback အတိုင်းပဲ။ Key ကို code ထဲ ဘယ်တော့မှ မထည့်ပါနဲ့ (Vercel env var ထဲမှာပဲ ထားပါ)။
+
+## အသံ backup — ElevenLabs key (free, ကတ်မလို) / Backup voice
+
+Azure ကျောင်းသားအကောင့် (Myanmar မပါ) ဒါမှမဟုတ် ကတ်မရှိလို့ Azure key မယူနိုင်ရင်၊ ElevenLabs က backup ပါ — **free tier, တစ်လ စာလုံး 10,000 အခမဲ့၊ email နဲ့ sign up ရုံ၊ ကတ်မလို**။
+
+1. [elevenlabs.io](https://elevenlabs.io) ဖွင့် → **Sign up** (email only, ကတ်မလို) → အကောင့်ဝင်ပါ
+2. ညာဘက်အပေါ် Profile icon → **API Keys** (သို့) Settings → API Keys → **Create API Key** → key ကို Copy လုပ်ပါ
+3. [Vercel dashboard](https://vercel.com/zenn-s-projects1/movie-translate-app) → Project **Settings → Environment Variables** → ထည့်ပါ
+   - `ELEVENLABS_API_KEY` = key
+   - Environment: **Production**
+   - (လိုချင်ရင် `ELEVENLABS_VOICE_ID` = ကိုယ်ကြိုက်တဲ့ ElevenLabs voice ID — မထည့်ရင် Thiha = George (ကျား), Nilar = Sarah (မ) ကို သုံးတယ်)
+4. **Deployments** → အပေါ်ဆုံး deployment ရဲ့ `⋯` → **Redeploy** — key ထည့်ပြီးမှ redeploy လုပ်မှ အလုပ်လုပ်ပါတယ်
+5. စမ်းပါ — အသံထုတ်တိုင်း provider က `elevenlabs` လို့ ပြရင် ElevenLabs အသံ ရပြီ
+
+သတိပြုပါ — ElevenLabs အသံက Thiha အသံအစစ် **မဟုတ်ဘူး**၊ ElevenLabs အသံ (George/Sarah) က မြန်မာစကား ပြောတာပါ။ ဒါပေမဲ့ Google အသံထက် အများကြီး သဘာဝကျတယ်။ Key မထည့်ထားရင် ဒီ provider ကို ကျော်သွားပြီး Edge → Google အတိုင်း ဆက်လုပ်ပါတယ်။
 
 ## ကန့်သတ်ချက်များ / Limits
 

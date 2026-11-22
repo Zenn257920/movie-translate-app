@@ -4,6 +4,7 @@
  * Body: { text: string, voice?: 'thiha' | 'nilar' }  (thiha = default)
  * Success: MP3 bytes, Content-Type audio/mpeg,
  *   X-TTS-Provider: 'azure' (Thiha/Nilar via Azure Speech key),
+ *   'elevenlabs' (ElevenLabs voice speaking Burmese, via API key),
  *   'edge' (Thiha/Nilar) or 'google' (fallback)
  * Failure: JSON { error: string } with status 400/502 — never fake audio.
  *

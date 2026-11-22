@@ -9,9 +9,12 @@
  * Order: Azure Speech first — but ONLY when AZURE_SPEECH_KEY +
  * AZURE_SPEECH_REGION are set (official REST API, F0 free tier,
  * the reliable way to get the real Thiha/Nilar voices). Then
- * Microsoft Edge TTS (native Thiha/Nilar voices, no API key — the
- * same consumer endpoint the Edge browser uses), Google Translate
- * TTS last. The caller reports the real provider via X-TTS-Provider.
+ * ElevenLabs (only when ELEVENLABS_API_KEY is set — free tier, no
+ * bank card; an ElevenLabs voice speaking Burmese, not Thiha).
+ * Then Microsoft Edge TTS (native Thiha/Nilar voices, no API key —
+ * the same consumer endpoint the Edge browser uses), Google
+ * Translate TTS last. The caller reports the real provider via
+ * X-TTS-Provider.
  *
  * Edge handshake (kept in sync with rany2/edge-tts): since ~Oct 2024
  * (edge-tts issue #290) the endpoint 403s any handshake that lacks the
@@ -27,7 +30,7 @@ import WebSocket from 'ws';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 
 export type ServerVoice = 'thiha' | 'nilar';
-export type ServerProvider = 'azure' | 'edge' | 'google';
+export type ServerProvider = 'azure' | 'elevenlabs' | 'edge' | 'google';
 
 const VOICE_NAMES: Record<ServerVoice, string> = {
   thiha: 'my-MM-ThihaNeural',
@@ -306,6 +309,33 @@ async function synthesizeAzureChunk(
   return Buffer.from(await res.arrayBuffer());
 }
 
+/** ElevenLabs TTS — official REST API, one chunk. */
+async function synthesizeElevenLabsChunk(
+  text: string,
+  apiKey: string,
+  voiceId: string,
+): Promise<Buffer> {
+  const url =
+    `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}` +
+    '?output_format=mp3_44100_128';
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'xi-api-key': apiKey,
+      'Content-Type': 'application/json',
+      Accept: 'audio/mpeg',
+    },
+    body: JSON.stringify({
+      text,
+      model_id: 'eleven_v4', // supports Burmese (my)
+      language_code: 'my',
+    }),
+  });
+  // Never log the key — only the HTTP status.
+  if (!res.ok) throw new Error(`ElevenLabs HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /** Google Translate TTS, server-side (no CORS here). One short chunk. */
 async function synthesizeGoogleChunk(text: string): Promise<Buffer> {
   const url =
@@ -329,7 +359,8 @@ export interface TtsResult {
 /**
  * Synthesize Burmese speech.
  * Order: Azure Speech (only when AZURE_SPEECH_KEY + AZURE_SPEECH_REGION
- * are set) → Edge TTS (Thiha/Nilar, no key) → Google TTS fallback.
+ * are set) → ElevenLabs (only when ELEVENLABS_API_KEY is set) →
+ * Edge TTS (Thiha/Nilar, no key) → Google TTS fallback.
  * Throws only if ALL tried providers fail, naming each failure.
  */
 export async function synthesizeBurmese(
@@ -368,7 +399,36 @@ export async function synthesizeBurmese(
     }
   }
 
-  // 2. Edge TTS, chunk by chunk.
+  // 2. ElevenLabs — official REST API, free tier needs no bank card.
+  // Premade voices the free plan can use: George (male) for Thiha,
+  // Sarah (female) for Nilar. ELEVENLABS_VOICE_ID overrides both.
+  const elevenKey = process.env.ELEVENLABS_API_KEY?.trim();
+  if (elevenKey) {
+    const elevenVoiceId =
+      process.env.ELEVENLABS_VOICE_ID?.trim() ||
+      (voice === 'nilar' ? 'EXAVITQu4vr4xnSDxMaL' : 'JBFqnCBsd6RMkjVDRZzb');
+    try {
+      const chunks = splitForTts(text);
+      const parts: Buffer[] = [];
+      for (const chunk of chunks) {
+        parts.push(await synthesizeElevenLabsChunk(chunk, elevenKey, elevenVoiceId));
+      }
+      const audio = Buffer.concat(parts);
+      if (audio.length === 0) throw new Error('ElevenLabs မှ အသံဗလာ ပြန်လာတယ်');
+      return { audio, provider: 'elevenlabs' };
+    } catch (elevenErr) {
+      // Log status only — the key must never appear in logs.
+      console.error(
+        '[tts] ElevenLabs failed:',
+        elevenErr instanceof Error ? elevenErr.message : 'unknown',
+      );
+      failures.push(
+        `ElevenLabs: ${elevenErr instanceof Error ? elevenErr.message : 'ElevenLabs မရပါ'}`,
+      );
+    }
+  }
+
+  // 3. Edge TTS, chunk by chunk.
   try {
     const chunks = splitForTts(text);
     const parts: Buffer[] = [];
@@ -380,8 +440,12 @@ export async function synthesizeBurmese(
     return { audio, provider: 'edge' };
   } catch (edgeErr) {
     const edgeMsg = edgeErr instanceof Error ? edgeErr.message : 'Edge TTS မရပါ';
+    // Diagnostic: the real reason (403 handshake, timeout, close code)
+    // is otherwise swallowed when Google succeeds — it only shows in
+    // Vercel's function logs. Never includes the Sec-MS-GEC token.
+    console.error('[tts] Edge failed:', edgeMsg);
     failures.push(`Edge: ${edgeMsg}`);
-    // 3. Google TTS fallback, server-side.
+    // 4. Google TTS fallback, server-side.
     try {
       const pieces = splitForGoogle(text);
       const parts: Buffer[] = [];
