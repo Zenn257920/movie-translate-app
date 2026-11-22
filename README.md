@@ -16,7 +16,7 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 1. **Audio** — `AudioContext.decodeAudioData` နဲ့ ဗီဒီယိုထဲက အသံကို 16kHz mono အဖြစ် ထုတ်တယ် (browser ထဲမှာ)
 2. **Transcribe** — Whisper (`@xenova/transformers`, tiny/base) ကို Web Worker ထဲမှာ run တယ် — model က HuggingFace CDN ကနေ လာတယ်, browser ထဲ cache ဖြစ်တယ်
 3. **Translate** — တရုတ် → မြန်မာ ကို Google Translate free endpoint (`translate.googleapis.com`, key မလို) နဲ့ ပြန်တယ်
-4. **Voiceover** — မြန်မာ အသံကို **server** (`POST /api/tts`, Vercel) က ထုတ်ပေးတယ် — Microsoft **Edge TTS** အရင် (`my-MM-ThihaNeural` / `my-MM-NilarNeural`)၊ မရရင် server-side Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ တိုက်ရိုက်ခေါ်တာ မရလို့ (Edge WebSocket ချိတ်မရ + Google fetch CORS ပိတ်တယ်) server ကို ပြောင်းထားတာ
+4. **Voiceover** — မြန်မာ အသံကို **server** (`POST /api/tts`, Vercel) က ထုတ်ပေးတယ် — Azure Speech key ရှိရင် အရင်ဆုံး Azure (Thiha/Nilar အစစ်)၊ ပြီးရင် Microsoft **Edge TTS** (`my-MM-ThihaNeural` / `my-MM-NilarNeural`)၊ မရရင် server-side Google TTS fallback။ ဖုန်းဘရောက်ဇာကနေ တိုက်ရိုက်ခေါ်တာ မရလို့ (Edge WebSocket ချိတ်မရ + Google fetch CORS ပိတ်တယ်) server ကို ပြောင်းထားတာ
 5. **Outputs** — Voiceover MP3, Burmese SRT (Whisper timestamps), မြန်မာ script, မူရင်းစာသား
 
 ## အသံ / Voice
@@ -25,6 +25,22 @@ Upload a Chinese video and get back a Burmese AI voiceover recap + Burmese subti
 - **Alternative: Nilar (မ)** — `my-MM-NilarNeural`
 - အသံထုတ်တိုင်း ဘယ် engine က ပြောလဲ ပြတယ် — Thiha မရရင် Google TTS fallback, အဲဒါလဲ မရရင် browser voice (play-only) — ဘယ်တော့မှ Thiha လို့ လိမ်မပြောဘူး
 - Google ရဲ့ မြန်မာ အသံကို default အဖြစ် **မသုံးဘူး** (အသံမကောင်းလို့)
+
+## Thiha အသံအစစ် ရဖို့ — Azure Speech key (free) / Real Thiha voice
+
+Edge TTS က Vercel server ကတောင် ချိတ်မရတတ်လို့ (Microsoft က datacenter IP တွေကို ပိတ်တတ်တယ်)၊ အသံအစစ် သေချာရဖို့ အကောင်းဆုံးနည်းက Azure Speech free key ပါ — **F0 free tier, တစ်လ 500,000 စာလုံး အခမဲ့** (recap တစ်ပုဒ်က စာလုံး ရာဂဏန်းပဲ ရှိတယ်၊ လုံးဝ မကုန်ဘူး)။
+
+1. [Azure Portal](https://portal.azure.com) ဖွင့် → **Create a resource** → **Speech** လို့ ရှာပါ
+2. Resource group အသစ် (ဥပမာ `movie-translate`) → Region ရွေးပါ (အနီးဆုံး **Southeast Asia**) → Pricing tier **Free F0** ရွေးပါ → **Review + create**
+3. Resource ဖွင့်ပြီး **Keys and Endpoint** မှာ **KEY 1** ကို Copy လုပ်ပါ၊ Region ကိုလည်း မှတ်ထားပါ (ဥပမာ `southeastasia`)
+4. [Vercel dashboard](https://vercel.com/zenn-s-projects1/movie-translate-app) → Project **Settings → Environment Variables** → ထည့်ပါ
+   - `AZURE_SPEECH_KEY` = KEY 1
+   - `AZURE_SPEECH_REGION` = `southeastasia`
+   - Environment: **Production** (အားလုံးရွေးလည်း ရတယ်)
+5. **Deployments** → အပေါ်ဆုံး deployment ရဲ့ `⋯` → **Redeploy** — key ထည့်ပြီးမှ redeploy လုပ်မှ အလုပ်လုပ်ပါတယ်
+6. စမ်းပါ — အသံထုတ်တိုင်း provider က `azure` လို့ ပြရင် Thiha အသံအစစ် ရပြီ
+
+Key မထည့်ထားရင်လည်း app က ဆက်အလုပ်လုပ်ပါတယ် — Edge → Google fallback အတိုင်းပဲ။ Key ကို code ထဲ ဘယ်တော့မှ မထည့်ပါနဲ့ (Vercel env var ထဲမှာပဲ ထားပါ)။
 
 ## ကန့်သတ်ချက်များ / Limits
 
@@ -44,4 +60,4 @@ npm run dev     # http://localhost:3000 (API route /api/tts အပါအဝင�
 npm run build   # Vercel deploy — API routes ပါလို့ static export မဟုတ်ဘူး
 ```
 
-Deploy: Vercel မှာ GitHub repo ကို import လုပ်ပြီး Deploy နှိပ်ရုံပဲ (env var မလို)။
+Deploy: Vercel မှာ GitHub repo ကို import လုပ်ပြီး Deploy နှိပ်ရုံပဲ (env var မထည့်လည်း အလုပ်လုပ်တယ် — Thiha အသံအစစ် လိုချင်ရင် အပေါ်က Azure key ၂ ခုကို ထည့်ပါ)။

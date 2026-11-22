@@ -6,14 +6,17 @@
  * fetch is CORS-blocked from the browser. From the server there is no
  * CORS problem and no browser WebSocket limitation.
  *
- * Order: Microsoft Edge TTS first (native Thiha/Nilar voices, no API key —
- * the same consumer endpoint the Edge browser uses), Google Translate TTS
- * second. The caller reports the real provider via X-TTS-Provider.
+ * Order: Azure Speech first — but ONLY when AZURE_SPEECH_KEY +
+ * AZURE_SPEECH_REGION are set (official REST API, F0 free tier,
+ * the reliable way to get the real Thiha/Nilar voices). Then
+ * Microsoft Edge TTS (native Thiha/Nilar voices, no API key — the
+ * same consumer endpoint the Edge browser uses), Google Translate
+ * TTS last. The caller reports the real provider via X-TTS-Provider.
  */
 import WebSocket from 'ws';
 
 export type ServerVoice = 'thiha' | 'nilar';
-export type ServerProvider = 'edge' | 'google';
+export type ServerProvider = 'azure' | 'edge' | 'google';
 
 const VOICE_NAMES: Record<ServerVoice, string> = {
   thiha: 'my-MM-ThihaNeural',
@@ -187,6 +190,32 @@ function synthesizeEdgeChunk(text: string, voiceName: string): Promise<Buffer> {
   });
 }
 
+/** Azure Speech REST API — official endpoint, one chunk. */
+async function synthesizeAzureChunk(
+  text: string,
+  voiceName: string,
+  key: string,
+  region: string,
+): Promise<Buffer> {
+  const url = `https://${region}.tts.speech.microsoft.com/cognitiveservices/v1`;
+  const ssml =
+    `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='my-MM'>` +
+    `<voice name='${voiceName}'>${escapeXml(text)}</voice></speak>`;
+  const res = await fetch(url, {
+    method: 'POST',
+    headers: {
+      'Ocp-Apim-Subscription-Key': key,
+      'Content-Type': 'application/ssml+xml',
+      'X-Microsoft-OutputFormat': 'audio-24khz-48kbitrate-mono-mp3',
+      'User-Agent': 'movie-translate-app',
+    },
+    body: ssml,
+  });
+  // Never log the key — only the HTTP status.
+  if (!res.ok) throw new Error(`Azure Speech HTTP ${res.status}`);
+  return Buffer.from(await res.arrayBuffer());
+}
+
 /** Google Translate TTS, server-side (no CORS here). One short chunk. */
 async function synthesizeGoogleChunk(text: string): Promise<Buffer> {
   const url =
@@ -208,15 +237,44 @@ export interface TtsResult {
 }
 
 /**
- * Synthesize Burmese speech. Edge (Thiha/Nilar) first; Google fallback.
- * Throws only if BOTH fail, with the Edge error as the main reason.
+ * Synthesize Burmese speech.
+ * Order: Azure Speech (only when AZURE_SPEECH_KEY + AZURE_SPEECH_REGION
+ * are set) → Edge TTS (Thiha/Nilar, no key) → Google TTS fallback.
+ * Throws only if ALL tried providers fail, naming each failure.
  */
 export async function synthesizeBurmese(
   text: string,
   voice: ServerVoice,
 ): Promise<TtsResult> {
   const voiceName = VOICE_NAMES[voice];
-  // 1. Edge TTS, chunk by chunk.
+  const failures: string[] = [];
+
+  // 1. Azure Speech — official REST API, real Thiha/Nilar.
+  const azureKey = process.env.AZURE_SPEECH_KEY?.trim();
+  const azureRegion = process.env.AZURE_SPEECH_REGION?.trim();
+  if (azureKey && azureRegion) {
+    try {
+      const chunks = splitForTts(text);
+      const parts: Buffer[] = [];
+      for (const chunk of chunks) {
+        parts.push(await synthesizeAzureChunk(chunk, voiceName, azureKey, azureRegion));
+      }
+      const audio = Buffer.concat(parts);
+      if (audio.length === 0) throw new Error('Azure Speech မှ အသံဗလာ ပြန်လာတယ်');
+      return { audio, provider: 'azure' };
+    } catch (azureErr) {
+      // Log status only — the key must never appear in logs.
+      console.error(
+        '[tts] Azure Speech failed:',
+        azureErr instanceof Error ? azureErr.message : 'unknown',
+      );
+      failures.push(
+        `Azure: ${azureErr instanceof Error ? azureErr.message : 'Azure မရပါ'}`,
+      );
+    }
+  }
+
+  // 2. Edge TTS, chunk by chunk.
   try {
     const chunks = splitForTts(text);
     const parts: Buffer[] = [];
@@ -228,7 +286,8 @@ export async function synthesizeBurmese(
     return { audio, provider: 'edge' };
   } catch (edgeErr) {
     const edgeMsg = edgeErr instanceof Error ? edgeErr.message : 'Edge TTS မရပါ';
-    // 2. Google TTS fallback, server-side.
+    failures.push(`Edge: ${edgeMsg}`);
+    // 3. Google TTS fallback, server-side.
     try {
       const pieces = splitForGoogle(text);
       const parts: Buffer[] = [];
@@ -241,9 +300,8 @@ export async function synthesizeBurmese(
     } catch (googleErr) {
       const googleMsg =
         googleErr instanceof Error ? googleErr.message : 'Google TTS မရပါ';
-      throw new Error(
-        `မြန်မာအသံ ထုတ်မရပါ — Edge: ${edgeMsg} | Google: ${googleMsg}`,
-      );
+      failures.push(`Google: ${googleMsg}`);
+      throw new Error(`မြန်မာအသံ ထုတ်မရပါ — ${failures.join(' | ')}`);
     }
   }
 }
