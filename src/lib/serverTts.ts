@@ -28,6 +28,17 @@
  * Edg/ version must match the Sec-MS-GEC-Version's Chromium version.
  * Sending only TrustedClientToken, or a v1 token, is why Edge failed
  * even from Vercel and everything fell back to Google.
+ *
+ * Edge MESSAGE FRAMING (kept in sync with edge-tts communicate.py —
+ * this is where the empty-turn bug lived, 2026-11-22): TEXT frames
+ * (turn.start / turn.end / response / audio.metadata) are ASCII
+ * `Header: value\r\n...` + `\r\n\r\n` + body. BINARY frames are
+ * DIFFERENT: a 2-byte big-endian header length, then that many bytes
+ * of ASCII headers (each `Key: value` line ending `\r\n`, NO blank
+ * line), then the raw MP3 bytes. There is NO `\r\n\r\n` in a binary
+ * audio frame — searching for one finds nothing and the audio is
+ * silently dropped, so the turn ends with zero audio. parseEdgeFrame
+ * below implements the upstream framing exactly.
  */
 import WebSocket from 'ws';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -135,6 +146,72 @@ function splitForGoogle(text: string, maxLen = 180): string[] {
   return out.filter(Boolean);
 }
 
+/** Pull the `Path:` header value out of ASCII `Key: value` header lines. */
+function edgePathFromHeaders(headerText: string): string | null {
+  for (const line of headerText.split('\r\n')) {
+    const idx = line.indexOf(':');
+    if (idx > 0 && line.slice(0, idx).trim().toLowerCase() === 'path') {
+      return line.slice(idx + 1).trim();
+    }
+  }
+  return null;
+}
+
+export interface EdgeFrame {
+  /** The `Path:` header value (e.g. "audio", "turn.end"), or null. */
+  path: string | null;
+  /** Raw MP3 bytes for audio frames (null for text frames). */
+  audio: Buffer | null;
+  /** First 500 chars of the frame's text, for logging non-audio frames. */
+  textPreview: string | null;
+}
+
+/**
+ * Parse one Edge WebSocket message exactly like edge-tts 7.3.1
+ * (communicate.py) does. `isBinary` is the `ws` message flag — with
+ * `ws` both text and binary frames arrive as Buffers, so the flag is
+ * the only reliable way to tell them apart.
+ *
+ * Binary: [2-byte BE header length L][L bytes of headers][raw audio].
+ * Text:   headers + "\r\n\r\n" + body.
+ */
+export function parseEdgeFrame(data: Buffer, isBinary: boolean): EdgeFrame {
+  if (isBinary) {
+    if (data.length < 2) return { path: null, audio: null, textPreview: null };
+    const headerLen = data.readUInt16BE(0);
+    // Header text occupies bytes [2, 2+headerLen); audio starts at 2+headerLen.
+    if (2 + headerLen > data.length) {
+      // Implausible length — fall back to the old "\r\n\r\n" search so a
+      // differently-shaped frame is not silently lost; log it via the caller.
+      const sep = data.indexOf('\r\n\r\n');
+      if (sep === -1) return { path: null, audio: null, textPreview: null };
+      const headerText = data.subarray(0, sep).toString('utf8');
+      const path = edgePathFromHeaders(headerText);
+      return {
+        path,
+        audio: path === 'audio' ? data.subarray(sep + 4) : null,
+        textPreview: headerText.slice(0, 500),
+      };
+    }
+    const headerText = data.subarray(2, 2 + headerLen).toString('utf8');
+    const path = edgePathFromHeaders(headerText);
+    return {
+      path,
+      audio: path === 'audio' ? data.subarray(2 + headerLen) : null,
+      textPreview: headerText.slice(0, 500),
+    };
+  }
+  const text = data.toString('utf8');
+  const sep = text.indexOf('\r\n\r\n');
+  const headerText = sep === -1 ? text : text.slice(0, sep);
+  const body = sep === -1 ? '' : text.slice(sep + 4);
+  return {
+    path: edgePathFromHeaders(headerText),
+    audio: null,
+    textPreview: (headerText + (body ? '\r\n\r\n' + body : '')).slice(0, 500),
+  };
+}
+
 /** One Edge TTS chunk -> MP3 bytes. A single WebSocket turn. */
 function synthesizeEdgeChunkOnce(
   text: string,
@@ -195,46 +272,68 @@ function synthesizeEdgeChunkOnce(
       // the caller retries it instead of returning an empty MP3.
       else if (!data || data.length === 0)
         reject(new Error('Edge TTS မှ အသံမရပါ'));
-      else resolve(data);
+      else {
+        console.error(
+          `[tts] Edge turn end: ${audioParts.length} audio parts, ${data.length} bytes`,
+        );
+        resolve(data);
+      }
     };
 
-    const SEP = Buffer.from('\r\n\r\n');
     ws.on('open', () => {
+      // speech.config — upstream defaults (SentenceBoundary): sentence
+      // metadata on, word metadata off; trailing CRLF after the JSON.
       const config =
         `X-Timestamp:${edgeTimestamp()}\r\n` +
         'Content-Type:application/json; charset=utf-8\r\n' +
         'Path:speech.config\r\n\r\n' +
         '{"context":{"synthesis":{"audio":{"metadataoptions":' +
-        '{"sentenceBoundaryEnabled":"false","wordBoundaryEnabled":"false"},' +
-        '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}';
+        '{"sentenceBoundaryEnabled":"true","wordBoundaryEnabled":"false"},' +
+        '"outputFormat":"audio-24khz-48kbitrate-mono-mp3"}}}}\r\n';
       ws.send(config);
+      // Upstream sends a FRESH request id here, different from the
+      // ConnectionId in the URL. SSML matches upstream byte-for-byte:
+      // xml:lang is 'en-US' for every voice, prosody carries all three
+      // attributes in upstream order.
+      const requestId = randomUUID().replace(/-/g, '');
       const ssml =
-        `X-RequestId:${connectionId}\r\n` +
+        `X-RequestId:${requestId}\r\n` +
         'Content-Type:application/ssml+xml\r\n' +
         // Upstream appends a trailing "Z" here (an Edge bug it preserves).
         `X-Timestamp:${edgeTimestamp()}Z\r\n` +
         'Path:ssml\r\n\r\n' +
-        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='my-MM'>` +
-        `<voice name='${voiceName}'><prosody rate='+0%' pitch='+0Hz'>${escapeXml(text)}</prosody></voice></speak>`;
+        `<speak version='1.0' xmlns='http://www.w3.org/2001/10/synthesis' xml:lang='en-US'>` +
+        `<voice name='${voiceName}'><prosody pitch='+0Hz' rate='+0%' volume='+0%'>${escapeXml(text)}</prosody></voice></speak>`;
       ws.send(ssml);
     });
 
-    ws.on('message', (data: WebSocket.RawData) => {
-      const buf = Buffer.isBuffer(data) ? data : Buffer.from(data as ArrayBuffer);
-      // Text frames (turn.start / turn.end) are ASCII; binary frames carry audio.
-      const sepIdx = buf.indexOf(SEP);
-      if (sepIdx === -1) {
-        const asText = buf.toString('utf8');
-        if (asText.includes('Path:turn.end')) {
-          done(undefined, Buffer.concat(audioParts));
+    ws.on('message', (data: WebSocket.RawData, isBinary: boolean) => {
+      const buf = Buffer.isBuffer(data)
+        ? data
+        : typeof data === 'string'
+          ? Buffer.from(data, 'utf8')
+          : Buffer.from(data as ArrayBuffer);
+      const frame = parseEdgeFrame(buf, isBinary);
+      if (frame.path === 'audio') {
+        // Upstream: a binary audio frame with no Content-Type and no data
+        // is the expected end-of-stream marker — skip it, don't count it.
+        if (frame.audio && frame.audio.length > 0) {
+          audioParts.push(frame.audio);
         }
         return;
       }
-      const header = buf.subarray(0, sepIdx).toString('utf8');
-      if (header.includes('Path:audio')) {
-        audioParts.push(buf.subarray(sepIdx + SEP.length));
-      } else if (header.includes('Path:turn.end')) {
+      if (frame.path === 'turn.end') {
         done(undefined, Buffer.concat(audioParts));
+        return;
+      }
+      // Any other TEXT frame (turn.start, response, audio.metadata, or
+      // an error frame the service sends when it rejects the SSML) is
+      // logged so a rejected turn never goes blind again. Never contains
+      // the token — frames carry no credentials.
+      if (!isBinary && frame.textPreview) {
+        console.error(`[tts] Edge frame (${frame.path ?? 'unknown'}):`, frame.textPreview);
+      } else if (isBinary && frame.path) {
+        console.error(`[tts] Edge binary frame (${frame.path})`);
       }
     });
 
@@ -357,8 +456,8 @@ export async function synthesizeBurmese(
   voice: ServerVoice,
 ): Promise<TtsResult> {
   // The Edge service errors on C0 control characters (Whisper output can
-  // contain them) — strip them before any provider sees the text.
-  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, '');
+  // contain them) — upstream replaces them with a space, so do the same.
+  text = text.replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f]/g, ' ');
   if (!text.trim()) throw new Error('မြန်မာအသံ ထုတ်မရပါ — စာမပါဘူး');
   const voiceName = VOICE_NAMES[voice];
   const failures: string[] = [];
